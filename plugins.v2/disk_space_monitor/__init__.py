@@ -1,159 +1,218 @@
 import shutil
-import logging
+from typing import Any, List, Dict, Tuple
 
-from moviepilot.plugin import Plugin
+from apscheduler.triggers.interval import IntervalTrigger
 
-class DiskSpaceMonitor(Plugin):
-    """
-    監控硬碟空間，當可用空間低於設定的閾值時發送通知。
-    支援在 Web UI 中進行設定，並包含獨立的啟用開關。
-    """
+from app.log import logger
+from app.plugins import _PluginBase
+from app.schemas import NotificationType
+
+class DiskSpaceMonitor(_PluginBase):
     # 插件基本資訊
-    name = "DiskSpaceMonitor"
-    version = "1.0.0"
-    description = "定期監控指定路徑的硬碟空間，並在低於閾值時發送通知。可在 Web UI 中啟用/禁用及設定。"
-    
-    # 定義定時任務的唯一 ID
-    JOB_ID = f"plugin_disk_space_monitor_check"
+    plugin_name = "硬盘空间监控"
+    plugin_desc = "定时监控指定路径的可用硬盘空间，并在低于阈值时发送通知。"
+    plugin_version = "4.0"
+    plugin_config_prefix = "diskmonitor_"
+    plugin_order = 99  # 加載順序，數字越大越靠後
+    auth_level = 2     # 可使用的用戶級別
 
-    def __init__(self, config, app):
-        super().__init__(config, app)
-        self.log = logging.getLogger(self.name)
-        # 插件初始化時，根據當前設定來設定或移除定時任務
-        self.schedule_check()
+    # 私有屬性，由 init_plugin 初始化
+    _enabled = False
+    _paths = []
+    _threshold_gb = 20
+    _interval_hours = 6
+    _notify = True
 
-    def get_ui_config(self):
+    def init_plugin(self, config: dict = None):
         """
-        定義並回傳在 Web UI 上顯示的設定表單。
+        初始化插件，從保存的設定中讀取值。
         """
-        # 從目前設定中獲取值，若不存在則使用預設值
-        is_enabled = self.config.get("enabled", False)
-        paths_str = "\n".join(self.config.get("paths", []))
-        threshold = self.config.get("threshold_gb", 20)
-        interval = self.config.get("check_interval_hours", 6)
+        if config:
+            self._enabled = config.get("enabled", False)
+            # 將 textarea 的字串轉換為路徑列表
+            paths_str = config.get("paths", "")
+            self._paths = [path.strip() for path in paths_str.split('\n') if path.strip()]
+            self._threshold_gb = int(config.get("threshold_gb", 20))
+            self._interval_hours = int(config.get("interval_hours", 6))
+            self._notify = config.get("notify", True)
 
-        # 定義表單欄位，將開關放在最前面
-        return [
+    def get_service(self) -> List[Dict[str, Any]]:
+        """
+        向 MoviePilot 核心註冊定時服務。
+        """
+        # 只有在啟用時才註冊服務
+        if self._enabled and self._interval_hours > 0:
+            return [
+                {
+                    "id": "disk_space_monitor_check",
+                    "name": "硬盘空间监控服务",
+                    # 使用 IntervalTrigger 來實現每隔 N 小時執行
+                    "trigger": IntervalTrigger(hours=self._interval_hours),
+                    "func": self.__check_disk_space,
+                }
+            ]
+        return []
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """
+        定義並回傳在 Web UI 上顯示的設定表單結構和預設值。
+        """
+        form_structure = [
             {
-                "name": "enabled",
-                "label": "啟用監控",
-                "type": "switch",
-                "value": is_enabled,
-                "description": "控制是否執行定期的硬碟空間檢查。關閉後，將不會執行任何檢查或發送通知。",
-            },
-            {
-                "name": "paths",
-                "label": "監控路徑",
-                "type": "textarea",
-                "value": paths_str,
-                "description": "需要監控的路徑列表，每行一個路徑。例如：/mnt/media 或 D:\\downloads",
-                "required": True,
-            },
-            {
-                "name": "threshold_gb",
-                "label": "警告閾值 (GB)",
-                "type": "number",
-                "value": threshold,
-                "description": "當可用空間低於此值時 (單位 GB)，將會發送通知。",
-                "attrs": {"min": 1, "step": 1},
-            },
-            {
-                "name": "check_interval_hours",
-                "label": "檢查時間間隔 (小時)",
-                "type": "number",
-                "value": interval,
-                "description": "每隔多少小時檢查一次硬碟空間。",
-                "attrs": {"min": 1, "step": 1},
-            },
+                'component': 'VForm',
+                'content': [
+                    # 第一行：開關
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [{
+                                    'component': 'VSwitch',
+                                    'props': {
+                                        'model': 'enabled',
+                                        'label': '启用插件',
+                                        'hint': '控制是否执行定期的硬盘空间检查。',
+                                        'persistent-hint': True,
+                                    }
+                                }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [{
+                                    'component': 'VSwitch',
+                                    'props': {
+                                        'model': 'notify',
+                                        'label': '发送通知',
+                                        'hint': '当空间不足时，是否发送通知。',
+                                        'persistent-hint': True,
+                                    }
+                                }]
+                            }
+                        ]
+                    },
+                    # 第二行：閾值和間隔
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {
+                                        'model': 'threshold_gb',
+                                        'label': '警告阈值 (GB)',
+                                        'type': 'number',
+                                        'placeholder': '例如：50',
+                                        'hint': '当可用空间低于此值时发送警告。',
+                                        'persistent-hint': True,
+                                    }
+                                }]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [{
+                                    'component': 'VTextField',
+                                    'props': {
+                                        'model': 'interval_hours',
+                                        'label': '检查间隔 (小时)',
+                                        'type': 'number',
+                                        'placeholder': '例如：4',
+                                        'hint': '每隔多少小时检查一次。',
+                                        'persistent-hint': True,
+                                    }
+                                }]
+                            }
+                        ]
+                    },
+                    # 第三行：監控路徑
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12},
+                                'content': [{
+                                    'component': 'VTextarea',
+                                    'props': {
+                                        'model': 'paths',
+                                        'label': '监控路径',
+                                        'rows': 4,
+                                        'placeholder': '每行一个路径，例如：\n/mnt/media/movies\n/downloads',
+                                        'hint': '插件将检查这些路径所在的磁盘分区。',
+                                        'persistent-hint': True,
+                                    }
+                                }]
+                            }
+                        ]
+                    }
+                ]
+            }
         ]
+        
+        # 表單的預設數據
+        default_data = {
+            "enabled": False,
+            "notify": True,
+            "threshold_gb": 20,
+            "interval_hours": 6,
+            "paths": ""
+        }
+        
+        return form_structure, default_data
 
-    def update_ui_config(self, new_config):
-        """
-        當使用者在 Web UI 中儲存設定時，此方法會被呼叫。
-        """
-        try:
-            # 更新設定值
-            self.config["enabled"] = new_config.get("enabled", False)
-            paths_str = new_config.get("paths", "")
-            self.config["paths"] = [path.strip() for path in paths_str.split('\n') if path.strip()]
-            self.config["threshold_gb"] = int(new_config.get("threshold_gb", 20))
-            self.config["check_interval_hours"] = int(new_config.get("check_interval_hours", 6))
-
-            # 儲存更新後的設定到檔案中
-            self.app.plugin_manager.save_plugin_config(self.name, self.config)
-            
-            # 根據新的啟用狀態，重新設定或移除排程任務
-            self.schedule_check()
-            
-            status_text = "啟用" if self.config["enabled"] else "停用"
-            self.log.info(f"插件設定已透過 Web UI 更新，當前狀態：{status_text}。")
-            return {"success": True, "message": f"設定已成功儲存！插件當前狀態：{status_text}。"}
-        except Exception as e:
-            self.log.error(f"更新插件設定時出錯: {e}")
-            return {"success": False, "message": f"儲存失敗: {e}"}
-
-    def schedule_check(self):
-        """
-        根據插件的啟用狀態，設定或移除 APScheduler 定時任務。
-        """
-        # 檢查 UI 中的啟用開關
-        if not self.config.get("enabled", False):
-            # 如果開關是關閉的，就移除定時任務
-            try:
-                self.app.scheduler.remove_job(self.JOB_ID)
-                self.log.info("插件已停用，已移除定時空間檢查任務。")
-            except Exception:
-                # 任務可能本來就不存在，忽略錯誤
-                pass
-            return
-
-        # 如果開關是開啟的，就新增或更新定時任務
-        interval_hours = self.config.get("check_interval_hours", 6)
-        self.log.info(f"硬碟空間監控任務已啟用，每 {interval_hours} 小時檢查一次。")
-        self.app.scheduler.add_job(
-            self.check_disk_space,
-            "interval",
-            hours=interval_hours,
-            id=self.JOB_ID,
-            replace_existing=True
-        )
-
-    def check_disk_space(self):
+    def __check_disk_space(self):
         """
         執行硬碟空間檢查的核心方法。
         """
-        # 雙重保險：再次確認插件是否啟用
-        if not self.config.get("enabled", False):
-            return
-            
-        self.log.debug("開始檢查硬碟空間...")
-        paths_to_check = self.config.get("paths", [])
-        if not paths_to_check:
-            self.log.warning("未在插件設定中指定任何監控路徑 (paths)，檢查已跳過。")
+        if not self._enabled:
             return
 
-        threshold_gb = self.config.get("threshold_gb", 20)
-        
-        for path in paths_to_check:
+        logger.debug(f"[{self.plugin_name}] 开始检查硬盘空间...")
+
+        if not self._paths:
+            logger.warning(f"[{self.plugin_name}] 未设定任何监控路径，检查已跳过。")
+            return
+
+        for path in self._paths:
             try:
+                # 使用 shutil.disk_usage 獲取硬碟使用情況 (total, used, free) in bytes
                 total, used, free = shutil.disk_usage(path)
+                
+                # 將可用空間從 bytes 轉換為 GB
                 free_gb = free / (1024 ** 3)
-                self.log.info(f"路徑 '{path}' 剩餘空間: {free_gb:.2f} GB")
+                
+                logger.info(f"[{self.plugin_name}] 路径 '{path}' 所在分区剩余空间: {free_gb:.2f} GB")
 
-                if free_gb < threshold_gb:
-                    title = "🚨 硬碟空間不足警告"
-                    message = (
-                        f"監控的路徑 '{path}' 空間即將用盡！\n"
-                        f"剩餘空間: {free_gb:.2f} GB\n"
-                        f"警告閾值: {threshold_gb} GB\n"
-                        f"請及時清理硬碟空間。"
-                    )
-                    self.app.notifier.send(title, message)
-                    self.log.warning(f"警告：路徑 '{path}' 的剩餘空間 ({free_gb:.2f} GB) 已低於閾值 ({threshold_gb} GB)，已發送通知。")
+                # 檢查可用空間是否低於閾值
+                if free_gb < self._threshold_gb:
+                    logger.warning(f"[{self.plugin_name}] 警告：路径 '{path}' 的剩余空间 ({free_gb:.2f} GB) 已低于阈值 ({self._threshold_gb} GB)！")
+                    
+                    if self._notify:
+                        title = "🚨 硬盘空间不足警告"
+                        message = (
+                            f"监控的路径 '{path}' 所在分区空间即将用尽！\n\n"
+                            f"▫️ 剩余空间: **{free_gb:.2f} GB**\n"
+                            f"▫️ 警告阈值: {self._threshold_gb} GB\n\n"
+                            "请及时清理硬盘空间。"
+                        )
+                        # 使用 MoviePilot v2 的標準通知方法
+                        self.post_message(mtype=NotificationType.System, title=title, text=message)
+                        logger.info(f"[{self.plugin_name}] 已就 '{path}' 的空间不足问题发送通知。")
 
             except FileNotFoundError:
-                self.log.error(f"錯誤：設定的監控路徑 '{path}' 不存在，請在 Web UI 中檢查設定。")
+                logger.error(f"[{self.plugin_name}] 错误：设定的监控路径 '{path}' 不存在，请检查插件设定。")
             except Exception as e:
-                self.log.error(f"檢查路徑 '{path}' 時發生未知錯誤: {e}")
+                logger.error(f"[{self.plugin_name}] 检查路径 '{path}' 时发生未知错误: {e}")
         
-        self.log.debug("硬碟空間檢查完成。")
+        logger.debug(f"[{self.plugin_name}] 硬盘空间检查完成。")
+
+    def stop_service(self):
+        """
+        停止插件。由於服務已交由 MoviePilot 核心管理，此處無需額外操作。
+        """
+        pass
