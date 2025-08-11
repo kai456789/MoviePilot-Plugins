@@ -1,13 +1,13 @@
 {
-  "SiteStatistic": {
+  "disk_space_monitor": {
     "name": "磁碟空間監控",
     "description": "磁碟空間監控。",
-    "labels": "站点",
-    "version": "2.0",
+    "labels": "磁碟空間",
+    "version": "1.0",
     "author": "k",
     "level": 2,
     "history": {
-      "v2.0": "MoviePilot V2 磁碟空間監控插件"
+      "v1.0": "MoviePilot V2 磁碟空間監控插件"
     }
   }
 }
