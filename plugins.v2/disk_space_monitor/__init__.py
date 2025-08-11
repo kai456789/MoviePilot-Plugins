@@ -28,7 +28,7 @@ class DiskMonitor(Plugin):
     # 插件版本
     version = "7.0"
     # 插件作者
-    author = "Gemini"
+    author = "k"
 
     # 插件的默認設定值
     # enabled: 是否啟用插件
