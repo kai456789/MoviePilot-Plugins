@@ -26,7 +26,7 @@ class DiskMonitor(Plugin):
     # 插件的簡短描述
     description = "監控指定路徑的磁碟剩餘空間，當低於設定的閾值時發送通知。"
     # 插件版本
-    version = "1.0.1"
+    version = "7.0"
     # 插件作者
     author = "Gemini"
 
