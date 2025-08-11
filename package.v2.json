@@ -3,7 +3,7 @@
     "name": "磁碟空間監控",
     "description": "磁碟空間監控。",
     "labels": "磁碟空間",
-    "version": "4.0",
+    "version": "5.0",
     "author": "k",
     "level": 2,
     "history": {
