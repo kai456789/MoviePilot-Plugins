@@ -1,0 +1,14 @@
+{
+  "SiteStatistic": {
+    "name": "磁碟空間監控",
+    "description": "磁碟空間監控。",
+    "labels": "站点",
+    "version": "2.0",
+    "icon": "statistic.png",
+    "author": "k",
+    "level": 2,
+    "history": {
+      "v2.0": "MoviePilot V2 磁碟空間監控插件"
+    }
+  }
+}
