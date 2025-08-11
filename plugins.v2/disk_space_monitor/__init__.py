@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Optional
 from app.plugins import PluginBase  # 你的環境若基類名為 Plugin，請替換為 from app.plugins import Plugin
 from app.log import logger
 
+try:
+    from app.plugins import PluginBase
+except ImportError:
+    from app.plugins import Plugin as PluginBase
+
 # 可選：提供聊天命令支持（若不需要，可刪除下方兩行與對應方法）
 from app.core.event import eventmanager, EventType  # 用於遠端命令與消息推送等
 
@@ -17,7 +22,7 @@ class DiskMonitor(PluginBase):
     plugin_name = "磁碟空間監控"
     plugin_desc = "定時檢測指定路徑的剩餘空間，低於門檻時推送告警，可手動查詢狀態"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/harddrive.png"
-    plugin_version = "v5.0"
+    plugin_version = "v6.0"
     plugin_author = "K"
     author_url = ""
     plugin_config_prefix = "diskmonitor"
