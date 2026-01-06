@@ -1,11 +1,10 @@
+
 import os
 import time
 from datetime import datetime, timedelta
-
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-
 from app.utils.http import RequestUtils
 from app.core.config import settings
 from app.plugins import _PluginBase
@@ -13,7 +12,7 @@ from typing import Any, List, Dict, Tuple, Optional
 from app.log import logger
 import xml.dom.minidom
 from app.utils.dom import DomUtils
-
+from urllib.parse import quote  # ★ 修正：缺失的匯入
 
 def retry(ExceptionToCheck: Any,
           tries: int = 3, delay: int = 3, backoff: int = 1, logger: Any = None, ret: Any = None):
@@ -25,7 +24,6 @@ def retry(ExceptionToCheck: Any,
     :param logger: 日志对象
     :param ret: 默认返回
     """
-
     def deco_retry(f):
         def f_retry(*args, **kwargs):
             mtries, mdelay = tries, delay
@@ -44,21 +42,19 @@ def retry(ExceptionToCheck: Any,
             if logger:
                 logger.warn('请确保当前季度番剧文件夹存在或检查网络问题')
             return ret
-
         return f_retry
-
     return deco_retry
 
 
 class ANiStrm(_PluginBase):
     # 插件名称
-    plugin_name = "ANiStrm"
+    plugin_name = "ANiStrm-AI"
     # 插件描述
     plugin_desc = "自动获取当季所有番剧，免去下载，轻松拥有一个番剧媒体库"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    # 插件版本
-    plugin_version = "2.4.2"
+    # 插件版本（★ 版本號小幅提升）
+    plugin_version = "1.0"
     # 插件作者
     plugin_author = "honue"
     # 作者主页
@@ -77,6 +73,7 @@ class ANiStrm(_PluginBase):
     _onlyonce = False
     _fulladd = False
     _storageplace = None
+    _date = None
 
     # 定时器
     _scheduler: Optional[BackgroundScheduler] = None
@@ -84,36 +81,40 @@ class ANiStrm(_PluginBase):
     def init_plugin(self, config: dict = None):
         # 停止现有任务
         self.stop_service()
-
         if config:
             self._enabled = config.get("enabled")
             self._cron = config.get("cron")
             self._onlyonce = config.get("onlyonce")
             self._fulladd = config.get("fulladd")
             self._storageplace = config.get("storageplace")
-            # 加载模块
+
+        # 加载模块
         if self._enabled or self._onlyonce:
             # 定时服务
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
 
             if self._enabled and self._cron:
                 try:
-                    self._scheduler.add_job(func=self.__task,
-                                            trigger=CronTrigger.from_crontab(self._cron),
-                                            name="ANiStrm文件创建")
+                    self._scheduler.add_job(
+                        func=self.__task,
+                        trigger=CronTrigger.from_crontab(self._cron),
+                        name="ANiStrm文件创建"
+                    )
                     logger.info(f'ANi-Strm定时任务创建成功：{self._cron}')
                 except Exception as err:
                     logger.error(f"定时任务配置错误：{str(err)}")
 
             if self._onlyonce:
                 logger.info(f"ANi-Strm服务启动，立即运行一次")
-                self._scheduler.add_job(func=self.__task, args=[self._fulladd], trigger='date',
-                                        run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
-                                        name="ANiStrm文件创建")
+                self._scheduler.add_job(
+                    func=self.__task, args=[self._fulladd], trigger='date',
+                    run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
+                    name="ANiStrm文件创建"
+                )
                 # 关闭一次性开关 全量转移
                 self._onlyonce = False
                 self._fulladd = False
-            self.__update_config()
+                self.__update_config()
 
             # 启动任务
             if self._scheduler.get_jobs():
@@ -121,92 +122,137 @@ class ANiStrm(_PluginBase):
                 self._scheduler.start()
 
     def __get_ani_season(self, idx_month: int = None) -> str:
+        """
+        按 1/4/7/10 分季，返回例如 '2026-1'
+        保留 idx_month 兼容，但默认为系统月份
+        """
         current_date = datetime.now()
-        current_year = current_date.year
-        current_month = idx_month if idx_month else current_date.month
-        for month in range(current_month, 0, -1):
-            if month in [10, 7, 4, 1]:
-                self._date = f'{current_year}-{month}'
-                return f'{current_year}-{month}'
+        year = current_date.year
+        month = idx_month if idx_month else current_date.month
+
+        if month in [1, 2, 3]:
+            season = 1
+        elif month in [4, 5, 6]:
+            season = 4
+        elif month in [7, 8, 9]:
+            season = 7
+        else:
+            season = 10
+
+        self._date = f'{year}-{season}'
+        return self._date
 
     @retry(Exception, tries=3, logger=logger, ret=[])
-    def get_current_season_list(self) -> List:
+    def get_current_season_list(self) -> List[str]:
+        """
+        兼容新舊回傳結構：既可能是 {'files': [...]} 也可能是 {'list': [...]}
+        """
         url = f'https://openani.an-i.workers.dev/{self.__get_ani_season()}/'
+        rep = RequestUtils(
+            ua=settings.USER_AGENT if settings.USER_AGENT else None,
+            proxies=settings.PROXY if settings.PROXY else None
+        ).post(url=url)
 
-        rep = RequestUtils(ua=settings.USER_AGENT if settings.USER_AGENT else None,
-                           proxies=settings.PROXY if settings.PROXY else None).post(url=url)
-        logger.debug(rep.text)
-        files_json = rep.json()['files']
-        return [file['name'] for file in files_json]
+        logger.debug(getattr(rep, "text", ""))
+
+        try:
+            data = rep.json()
+        except Exception as e:
+            logger.error(f'获取当季文件列表失败：返回非 JSON，{e}')
+            return []
+
+        files_json = data.get('files') or data.get('list') or []
+        names: List[str] = []
+        for item in files_json:
+            # item 可能是 dict 或純字串
+            name = item.get('name') if isinstance(item, dict) else item
+            if isinstance(name, str) and name.strip():
+                names.append(name.strip())
+        return names
 
     @retry(Exception, tries=3, logger=logger, ret=[])
-    def get_latest_list(self) -> List:
+    def get_latest_list(self) -> List[Dict[str, str]]:
+        """
+        解析 ani-download.xml，並將連結主機替換為 openani，且立即正規化為 .mp4?d=true
+        """
         addr = 'https://api.ani.rip/ani-download.xml'
-        ret = RequestUtils(ua=settings.USER_AGENT if settings.USER_AGENT else None,
-                           proxies=settings.PROXY if settings.PROXY else None).get_res(addr)
+        ret = RequestUtils(
+            ua=settings.USER_AGENT if settings.USER_AGENT else None,
+            proxies=settings.PROXY if settings.PROXY else None
+        ).get_res(addr)
+
         ret_xml = ret.text
-        ret_array = []
+        ret_array: List[Dict[str, str]] = []
+
         # 解析XML
         dom_tree = xml.dom.minidom.parseString(ret_xml)
         rootNode = dom_tree.documentElement
         items = rootNode.getElementsByTagName("item")
+
         for item in items:
-            rss_info = {}
+            rss_info: Dict[str, str] = {}
             # 标题
             title = DomUtils.tag_value(item, "title", default="")
             # 链接
             link = DomUtils.tag_value(item, "link", default="")
+            fixed = link.replace("resources.ani.rip", "openani.an-i.workers.dev")
             rss_info['title'] = title
-            rss_info['link'] = link.replace("resources.ani.rip", "openani.an-i.workers.dev")
+            rss_info['link'] = self._normalize_openani_url(fixed)
             ret_array.append(rss_info)
+
         return ret_array
 
-    def __touch_strm_file(self, file_name, file_url: str = None) -> bool:
+    def _normalize_openani_url(self, url: str) -> str:
+        """
+        將 openani URL 統一轉成 Emby / Jellyfin 可播放格式
+        強制輸出：xxx.mp4?d=true
+        """
+        if not url:
+            return ""
+        if url.endswith(".mp4?d=true"):
+            return url
+        if "?d=mp4" in url:
+            return url.replace("?d=mp4", ".mp4?d=true")
+        if url.endswith(".mp4"):
+            return f"{url}?d=true"
+        return f"{url}.mp4?d=true"
+
+    def __touch_strm_file(self, file_name: str, file_url: str = None) -> bool:
+        """
+        建立 .strm 檔；若提供 file_url 則正規化為 .mp4?d=true，
+        若不提供則使用季路徑 + 檔名（進行百分號編碼）
+        """
+        # 確保目錄存在
+        try:
+            if self._storageplace and not os.path.exists(self._storageplace):
+                os.makedirs(self._storageplace, exist_ok=True)
+        except Exception as e:
+            logger.error(f"创建存储目录失败：{self._storageplace}, {e}")
+            return False
+
         if not file_url:
-            # 季度API生成的URL，使用新格式
             encoded_filename = quote(file_name, safe='')
             src_url = f'https://openani.an-i.workers.dev/{self._date}/{encoded_filename}.mp4?d=true'
         else:
-            # 检查API获取的URL格式是否符合要求
-            if self._is_url_format_valid(file_url):
-                # 格式符合要求，直接使用
-                src_url = file_url
-            else:
-                # 格式不符合要求，进行转换
-                src_url = self._convert_url_format(file_url)
-        
+            src_url = self._normalize_openani_url(file_url)
+
         file_path = f'{self._storageplace}/{file_name}.strm'
         if os.path.exists(file_path):
             logger.debug(f'{file_name}.strm 文件已存在')
             return False
+
         try:
             with open(file_path, 'w') as file:
                 file.write(src_url)
-                logger.debug(f'创建 {file_name}.strm 文件成功')
-                return True
+            logger.debug(f'创建 {file_name}.strm 文件成功')
+            return True
         except Exception as e:
             logger.error('创建strm源文件失败：' + str(e))
             return False
 
-    def _is_url_format_valid(self, url: str) -> bool:
-        """检查URL格式是否符合要求（.mp4?d=true）"""
-        return url.endswith('.mp4?d=true')
-
-    def _convert_url_format(self, url: str) -> str:
-        """将URL转换为符合要求的格式"""
-        if '?d=mp4' in url:
-            # 将 ?d=mp4 替换为 .mp4?d=true
-            return url.replace('?d=mp4', '.mp4?d=true')
-        elif url.endswith('.mp4'):
-            # 如果已经以.mp4结尾，添加?d=true
-            return f'{url}?d=true'
-        else:
-            # 其他情况，添加.mp4?d=true
-            return f'{url}.mp4?d=true'
-
     def __task(self, fulladd: bool = False):
         cnt = 0
-        # 增量添加更新
+        # 增量添加更新（Top15）
         if not fulladd:
             rss_info_list = self.get_latest_list()
             logger.info(f'本次处理 {len(rss_info_list)} 个文件')
@@ -220,6 +266,7 @@ class ANiStrm(_PluginBase):
             for file_name in name_list:
                 if self.__touch_strm_file(file_name=file_name):
                     cnt += 1
+
         logger.info(f'新创建了 {cnt} 个strm文件')
 
     def get_state(self) -> bool:
@@ -227,10 +274,10 @@ class ANiStrm(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        pass
+        return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        pass
+        return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """
@@ -348,7 +395,7 @@ class ANiStrm(_PluginBase):
                                             'variant': 'tonal',
                                             'text': '自动从open ANi抓取下载直链生成strm文件，免去人工订阅下载' + '\n' +
                                                     '配合目录监控使用，strm文件创建在/downloads/strm' + '\n' +
-                                                    '通过目录监控转移到link媒体库文件夹 如/downloads/link/strm  mp会完成刮削',
+                                                    '通过目录监控转移到link媒体库文件夹 如/downloads/link/strm mp会完成刮削',
                                             'style': 'white-space: pre-line;'
                                         }
                                     },
@@ -386,7 +433,7 @@ class ANiStrm(_PluginBase):
         })
 
     def get_page(self) -> List[dict]:
-        pass
+        return []
 
     def stop_service(self):
         """
@@ -395,14 +442,15 @@ class ANiStrm(_PluginBase):
         try:
             if self._scheduler:
                 self._scheduler.remove_all_jobs()
-                if self._scheduler.running:
-                    self._scheduler.shutdown()
-                self._scheduler = None
+            if self._scheduler and self._scheduler.running:
+                self._scheduler.shutdown()
+            self._scheduler = None
         except Exception as e:
             logger.error("退出插件失败：%s" % str(e))
 
 
 if __name__ == "__main__":
+    # 僅供快速檢查，不在 MP 正式環境中使用
     anistrm = ANiStrm()
     name_list = anistrm.get_latest_list()
     print(name_list)
